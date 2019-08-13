@@ -10,6 +10,11 @@ import xml.etree.ElementTree as ET
 from docx import Document
 from pprint import pprint
 from PyPDF2 import PdfFileReader
+from PIL import Image
+import imagehash
+
+from utils.patterns import DOI_PATTERN, ALL_CC_LICENCES, RIGHTS_RESERVED_PATTERNS, PROOF_PATTERNS
+from utils.logos import PublisherLogo, ALL_LOGOS
 
 # create logger
 logger = logging.getLogger(__name__)
@@ -25,24 +30,6 @@ ch.setFormatter(formatter)
 # logger.addHandler(ch)
 
 NUMBER_OF_CHARACTERS_IN_ONE_PAGE = 2600
-
-# modified from: https://www.crossref.org/blog/dois-and-matching-regular-expressions/
-DOI_PATTERN = '10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+'
-
-CC_PATTERNS = [
-    {'pattern': "This is an open access article under the terms of the CC BY 4.0 license", 'error ratio': 0.1},
-    {'pattern': "This is an open access article under the CC BY license", 'error ratio': 0.1},
-    {'pattern': "http://creativecommons.org/licenses/by/4.0/", 'error ratio': 0.1},
-]
-
-RIGHTS_RESERVED_PATTERNS = [
-    {'pattern': "All rights reserved.", 'error ratio': 0.1},
-]
-
-PROOF_PATTERNS = [
-    {'pattern': "UNCORRECTED PROOF", 'error ratio': 0.1},
-    {'pattern': "Available online xxx", 'error ratio': 0},
-]
 
 PUBLISHER_PDF_METADATA_TAGS = [
     '/CrossMarkDomains#5B1#5D',
@@ -154,12 +141,13 @@ class BaseParser:
         return self.find_match_in_extracted_text(query=DOI_PATTERN, escape_char=False, allowed_error_ratio=0)
 
     def find_cc_statement_in_extracted_text(self):
-        for p in CC_PATTERNS:
-            m = self.find_match_in_extracted_text(query=p['pattern'], escape_char=False,
-                                                  allowed_error_ratio=p['error ratio'])
-            if m:
-                logger.debug("Found Creative Commons statement in extracted text: {}".format(m.group()))
-                return m
+        for l in ALL_CC_LICENCES:
+            for key, error_ratio in [('url', 0.05), ('long name', 0.1), ('short name', 0.05)]:
+                m = self.find_match_in_extracted_text(query=l[key], escape_char=False,
+                                                      allowed_error_ratio=error_ratio)
+                if m:
+                    logger.debug("Found Creative Commons statement in extracted text: {}".format(m.group()))
+                    return m
         logger.debug("Could not find a Creative Commons statement in extracted text")
         return None
 
@@ -345,12 +333,15 @@ class PdfParser(BaseParser):
         Runs CERMINE (https://github.com/CeON/CERMINE) on pdf file
         :return:
         '''
-        subprocess.run(["java", "-cp", "cermine-impl-1.13-jar-with-dependencies.jar",
+        try:
+            subprocess.run(["java", "-cp", "cermine-impl-1.13-jar-with-dependencies.jar",
                         "pl.edu.icm.cermine.ContentExtractor", "-path", self.file_dirname, "-outputs",
                         # '"jats,text"'
                         '"jats,text,zones,trueviz,images"'
                         ],
                        check=True)
+        except subprocess.CalledProcessError as e:
+            logger.error("return code: {}; output: {}".format(e.returncode, e.output))
 
     def parse_cermxml(self):
         cermxml_path = self.file_path.replace(self.file_ext, ".cermxml")
@@ -380,6 +371,27 @@ class PdfParser(BaseParser):
             self.cerm_journal_title = c_journal.text
 
         return self.cerm_doi, self.cerm_title, self.cerm_journal_title
+
+    def test_file_has_image_on_first_page(self):
+        images_folder = self.file_path.replace(self.file_ext, ".images")
+        if not os.path.exists(images_folder):
+            self.cermine_file()
+        for i in os.listdir(images_folder):
+            if "img_1_" in i:
+                return True
+        return False
+
+    def test_file_contains_publisher_logo(self, max_hash_difference=50):
+        images_folder = self.file_path.replace(self.file_ext, ".images")
+        if not os.path.exists(images_folder):
+            self.cermine_file()
+        for i in os.listdir(images_folder):
+            i_path = os.path.join(images_folder, i)
+            pl = PublisherLogo(path=i_path)
+            for l in ALL_LOGOS:
+                if l.test_hash_match(pl):
+                    return True
+        return False
 
     def test_file_metadata_contains_publisher_tags(self):
         for tag in PUBLISHER_PDF_METADATA_TAGS:
@@ -419,6 +431,9 @@ class PdfParser(BaseParser):
         :return: Tuple where: first element is string "success" or "fail" to indicate outcome; second element is
             string containing details
         '''
+        self.cermine_file()
+        self.test_file_has_image_on_first_page()
+
 
         approve_deposit = False
 
@@ -452,6 +467,8 @@ class PdfParser(BaseParser):
         title_match_cermxml = self.test_title_match_cermxml()
         self.test_results['title_match_cermxml'] = title_match_cermxml
         # endregion
+
+
 
         if more_than_three_pages and (title_match_file_metadata or title_match_extracted_text or title_match_cermxml):
             # sanity check (this is the correct file; no mistake on upload)

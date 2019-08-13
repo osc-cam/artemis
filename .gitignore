@@ -10,6 +10,9 @@ tests.py
 cermine-impl-1.13-jar-with-dependencies.jar
 Tkaczyk2015_Article_CERMINEAutomaticExtractionOfSt.pdf
 
+# publisher logo image files
+publisher_logos/
+
 # test files
 test_files/
 

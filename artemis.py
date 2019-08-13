@@ -8,6 +8,7 @@ import subprocess
 import textract
 import xml.etree.ElementTree as ET
 from docx import Document
+from pprint import pprint
 from PyPDF2 import PdfFileReader
 
 # create logger
@@ -24,10 +25,25 @@ ch.setFormatter(formatter)
 # logger.addHandler(ch)
 
 NUMBER_OF_CHARACTERS_IN_ONE_PAGE = 2600
-DOI_PATTERN = '/^10.\d{4,9}/[-._;()/:A-Z0-9]+$/i' # source: https://www.crossref.org/blog/dois-and-matching-regular-expressions/
+
+# modified from: https://www.crossref.org/blog/dois-and-matching-regular-expressions/
+DOI_PATTERN = '10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+'
+
 CC_PATTERNS = [
-    {'pattern': "This is an open access article under the terms of the CC BY 4.0 license", 'similarity': 0.9},
+    {'pattern': "This is an open access article under the terms of the CC BY 4.0 license", 'error ratio': 0.1},
+    {'pattern': "This is an open access article under the CC BY license", 'error ratio': 0.1},
+    {'pattern': "http://creativecommons.org/licenses/by/4.0/", 'error ratio': 0.1},
 ]
+
+RIGHTS_RESERVED_PATTERNS = [
+    {'pattern': "All rights reserved.", 'error ratio': 0.1},
+]
+
+PROOF_PATTERNS = [
+    {'pattern': "UNCORRECTED PROOF", 'error ratio': 0.1},
+    {'pattern': "Available online xxx", 'error ratio': 0},
+]
+
 PUBLISHER_PDF_METADATA_TAGS = [
     '/CrossMarkDomains#5B1#5D',
     '/CrossMarkDomains#5B2#5D',
@@ -95,7 +111,8 @@ class BaseParser:
                          "supported".format(type(self.extracted_text)))
         return self.extracted_text
 
-    def find_match_in_extracted_text(self, query=None, escape_char=True, expected_span=(0, 2600), allowed_error_ratio=.2):
+    def find_match_in_extracted_text(self, query=None, escape_char=True, expected_span=(0, 2600),
+                                     allowed_error_ratio=.1):
         """
         Fuzzy search extracted text.
         :param query: Search string; manuscript title by default
@@ -118,8 +135,11 @@ class BaseParser:
             pattern = "{}{{e<{}}}".format(query, int(allowed_error_ratio*len(query)))
         if not self.extracted_text:
             self.extract_text()
+        # remove all line breaks from extracted text; otherwise match will often fail
+        continuous_text = self.extracted_text.replace('\n', ' ').replace('  ', ' ')
         try:
-            m = regex.search(pattern, self.extracted_text, flags=regex.IGNORECASE)
+            logger.debug("pattern: {}".format(pattern))
+            m = regex.search(pattern, continuous_text, flags=regex.IGNORECASE)
             if m:
                 logger.debug("Match object: {}".format(m))
                 match_in_expected_position = False
@@ -131,14 +151,16 @@ class BaseParser:
         return None
 
     def find_doi_in_extracted_text(self):
-        return self.find_match_in_extracted_text(query=DOI_PATTERN, allowed_error_ratio=0)
+        return self.find_match_in_extracted_text(query=DOI_PATTERN, escape_char=False, allowed_error_ratio=0)
 
     def find_cc_statement_in_extracted_text(self):
         for p in CC_PATTERNS:
             m = self.find_match_in_extracted_text(query=p['pattern'], escape_char=False,
-                                              allowed_error_ratio=p['similarity'])
+                                                  allowed_error_ratio=p['error ratio'])
             if m:
+                logger.debug("Found Creative Commons statement in extracted text: {}".format(m.group()))
                 return m
+        logger.debug("Could not find a Creative Commons statement in extracted text")
         return None
 
     def convert_to_pdf(self):
@@ -173,8 +195,11 @@ class BaseParser:
         if self.dec_ms_title:
             if title_key in self.file_metadata.keys():
                 if SequenceMatcher(None, self.file_metadata[title_key], self.dec_ms_title).ratio() >= min_similarity:
+                    logger.debug("Found declared title in file metadata with a similarity of {}".format(min_similarity))
                     return True
                 else:
+                    logger.debug("Declared title could not be found in file metadata with a"
+                                 " similarity of {}".format(min_similarity))
                     return False
             else:
                 logger.error("File metadata does not contain title field, so cannot test match")
@@ -189,8 +214,10 @@ class BaseParser:
         """
         if self.dec_ms_title:
             if self.find_match_in_extracted_text():
+                logger.debug("Found declared title (or similar) in extracted text")
                 return True
             else:
+                logger.debug("Could not find declared title (or similar) in extracted text")
                 return False
         else:
             logger.error("No declared title (self.dec_ms_title), so cannot test match")
@@ -203,9 +230,11 @@ class BaseParser:
         :return:
         """
         if self.extracted_text:
-            if len(self.extracted_text) >= 3*NUMBER_OF_CHARACTERS_IN_ONE_PAGE:
+            if len(self.extracted_text) >= min_length:
+                logger.debug("Extracted text is longer than {} characters".format(min_length))
                 return True
             else:
+                logger.debug("Extracted text is shorter than {} characters".format(min_length))
                 return False
         logger.error("Extracted text unavailable (self.extracted_text), so could not perform test")
         return None
@@ -291,6 +320,7 @@ class PdfParser(BaseParser):
         with open(self.file_path, 'rb') as f:
             pdf = PdfFileReader(f, strict=False)
             info = pdf.getDocumentInfo()
+            # pprint(pdf.getPage(0).extractText())
             logger.debug("output of pdf.getDocumentInfo(): {}".format(info))
             self.number_of_pages = pdf.getNumPages()
             self.file_metadata = info
@@ -354,7 +384,9 @@ class PdfParser(BaseParser):
     def test_file_metadata_contains_publisher_tags(self):
         for tag in PUBLISHER_PDF_METADATA_TAGS:
             if tag in self.file_metadata.keys():
+                logger.debug("Found publisher tag {} in file metadata".format(tag))
                 return True
+        logger.debug("Could not find any publisher tags in file metadata")
         return False
 
     def test_title_match_cermxml(self, min_similarity=0.9):
@@ -366,15 +398,19 @@ class PdfParser(BaseParser):
             self.parse_cermxml()
         if self.dec_ms_title:
             if SequenceMatcher(None, self.cerm_title, self.dec_ms_title).ratio() >= min_similarity:
+                logger.debug("Declared title matches title identified by CERMINE")
                 return True
             else:
+                logger.debug("Declared title does not match title identified by CERMINE")
                 return False
         return None
 
     def test_doi_match(self):
         result = self.find_doi_in_extracted_text()
         if result:
+            logger.debug("Found DOI in extracted text")
             return True
+        logger.debug("Could not find DOI in extracted text")
         return False
 
     def parse(self):
@@ -410,6 +446,7 @@ class PdfParser(BaseParser):
         self.cermine_file()
         self.parse_cermxml()
         if self.cerm_doi:
+            logger.debug("Cermine identified DOI {} in this file".format(self.cerm_doi))
             doi_found_in_cermxml = True
             self.test_results['doi_found_in_cermxml'] = doi_found_in_cermxml
         title_match_cermxml = self.test_title_match_cermxml()
@@ -424,25 +461,25 @@ class PdfParser(BaseParser):
                 self.exclude_versions([SMUR, AM])
                 if self.dec_version.lower() in ['submitted version', 'accepted version', SMUR, AM]:
                     reason = 'PDF metadata contains publisher tags, but declared version is author-generated'
-                    return {'approved': approve_deposit, 'reason': reason}.update(self.test_results)
                 if cc_match_extracted_text:
                     reason = 'Create Commons licence detected in extracted text'
                     approve_deposit = True # could be proof, so additional checking is desirable
-                    return {'approved': approve_deposit, 'reason': reason}.update(self.test_results)
                 else:
                     reason = 'Publisher-generated version; no evidence of CC licence'
-                    return {'approved': approve_deposit, 'reason': reason}.update(self.test_results)
             else:
-                return "fail", "This is either a submitted or accepted version, " \
-                       "but declared version is {}".format(self.dec_version)
+                if self.dec_version.lower() in ['submitted version', 'accepted version']:
+                    approve_deposit = True
+                    reason = 'Could not find any evidence that this PDF is publisher-generated'
+                else:
+                    reason = "This is either a submitted or accepted version, " \
+                                   "but declared version is {}".format(self.dec_version)
         else:
-            return "fail", "File {} failed automated checks. more_than_three_pages: {}, title_match_file_metadata:" \
+            reason = "File {} failed automated checks. more_than_three_pages: {}, title_match_file_metadata:" \
                            " {}, title_match_extracted_text: {}".format(self.file_name,
                                                                         more_than_three_pages,
                                                                         title_match_file_metadata,
                                                                         title_match_extracted_text)
-        # self.cermine_file()
-        # self.parse_cermxml()
+        return {'approved': approve_deposit, 'reason': reason, **self.test_results}
 
 
 class VersionDetector:

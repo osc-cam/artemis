@@ -4,6 +4,7 @@ import logging
 import logging.config
 import os
 import regex
+import shelve
 import subprocess
 import textract
 import xml.etree.ElementTree as ET
@@ -14,7 +15,7 @@ from PIL import Image
 import imagehash
 
 from utils.patterns import DOI_PATTERN, ALL_CC_LICENCES, RIGHTS_RESERVED_PATTERNS, PROOF_PATTERNS
-from utils.logos import PublisherLogo, ALL_LOGOS
+from utils.logos import PublisherLogo
 
 # create logger
 logger = logging.getLogger(__name__)
@@ -28,6 +29,10 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 ch.setFormatter(formatter)
 # add ch to logger
 # logger.addHandler(ch)
+
+# LOGOS_DB_PATH = os.path.join(os.path.realpath(__file__), "utils", "logos_db.shelve") # for some reason, this doesn't
+# work with line: with shelve.open("utils/logos_db.shelve") as db:
+LOGOS_DB_PATH = "utils/logos_db.shelve"
 
 NUMBER_OF_CHARACTERS_IN_ONE_PAGE = 2600
 
@@ -142,7 +147,7 @@ class BaseParser:
 
     def find_cc_statement_in_extracted_text(self):
         for l in ALL_CC_LICENCES:
-            for key, error_ratio in [('url', 0.05), ('long name', 0.1), ('short name', 0.05)]:
+            for key, error_ratio in [('url', 0), ('long name', 0.1), ('short name', 0)]:
                 m = self.find_match_in_extracted_text(query=l[key], escape_char=False,
                                                       allowed_error_ratio=error_ratio)
                 if m:
@@ -293,6 +298,7 @@ class PdfParser(BaseParser):
     Parser for .pdf files
     """
     def __init__(self, file_path, dec_ms_title=None, dec_version=None, dec_authors=None, **kwargs):
+        self.cerm_ran_and_parsed = False
         self.cerm_doi = None
         self.cerm_title = None
         self.cerm_journal_title = None
@@ -351,26 +357,54 @@ class PdfParser(BaseParser):
         # extract DOI
         for c_id in root.iter('article-id'):
             if c_id.get('pub-id-type') == 'doi':
-                if self.cerm_doi != None:
+                if self.cerm_doi is not None:
                     logger.warning("Previously detected DOI {} will be overwritten by value {}".format(self.cerm_doi,
                                                                                                 c_id.text))
                 self.cerm_doi = c_id.text
 
         # extract title
         for c_title in root.find('front').iter('article-title'):
-            if self.cerm_title != None:
+            if self.cerm_title is not None:
                 logger.warning("Previously detected title '{}' will be overwritten by value '{}'".format(self.cerm_title,
                                                                                                    c_title.text))
             self.cerm_title = c_title.text
 
         # extract journal title
         for c_journal in root.iter('journal-title'):
-            if self.cerm_journal_title != None:
+            if self.cerm_journal_title is not None:
                 logger.warning("Previously detected journal title '{}' will be overwritten by"
                                " value '{}'".format(self.cerm_journal_title, c_journal.text))
             self.cerm_journal_title = c_journal.text
 
+        self.cerm_ran_and_parsed = True
         return self.cerm_doi, self.cerm_title, self.cerm_journal_title
+
+    def detect_publisher_logos(self, max_hash_difference=5, stop_at_first_match=False):
+        """
+        Detects publisher logos in file
+        :param max_hash_difference: max_hash_difference to be passed to PublisherLogo.test_hash_match
+        :param stop_at_first_match: if True, stop trying additional matches if one is found
+        :return: list of detected logos (as PublisherLogo instances)
+        """
+        detected_logos = []
+        images_folder = self.file_path.replace(self.file_ext, ".images")
+        if not os.path.exists(images_folder):
+            self.cermine_file()
+        for i in os.listdir(images_folder):
+            i_path = os.path.join(images_folder, i)
+            pl = PublisherLogo(i, path=i_path)
+            with shelve.open(LOGOS_DB_PATH) as db:
+                for key in db:
+                    logo = db[key]
+                    logo.test_hash_match(pl, max_hash_difference=max_hash_difference, method="perception")
+                    if logo.test_hash_match(pl, max_hash_difference=max_hash_difference):
+                        logger.debug("Extracted image {} matched logo {}".format(i_path, logo.name))
+                        detected_logos.append(logo)
+                        if stop_at_first_match:
+                            break
+            if detected_logos and stop_at_first_match:
+                break
+        return detected_logos
 
     def test_file_has_image_on_first_page(self):
         images_folder = self.file_path.replace(self.file_ext, ".images")
@@ -379,18 +413,6 @@ class PdfParser(BaseParser):
         for i in os.listdir(images_folder):
             if "img_1_" in i:
                 return True
-        return False
-
-    def test_file_contains_publisher_logo(self, max_hash_difference=50):
-        images_folder = self.file_path.replace(self.file_ext, ".images")
-        if not os.path.exists(images_folder):
-            self.cermine_file()
-        for i in os.listdir(images_folder):
-            i_path = os.path.join(images_folder, i)
-            pl = PublisherLogo(path=i_path)
-            for l in ALL_LOGOS:
-                if l.test_hash_match(pl):
-                    return True
         return False
 
     def test_file_metadata_contains_publisher_tags(self):
@@ -406,15 +428,17 @@ class PdfParser(BaseParser):
         Test if there is a match for declared title in title element of xml file produced by cermine
         :return: True, False or None
         """
-        if not self.cerm_title:
+        if not self.cerm_ran_and_parsed:
             self.parse_cermxml()
-        if self.dec_ms_title:
+        if self.dec_ms_title and self.cerm_title:
             if SequenceMatcher(None, self.cerm_title, self.dec_ms_title).ratio() >= min_similarity:
                 logger.debug("Declared title matches title identified by CERMINE")
                 return True
             else:
                 logger.debug("Declared title does not match title identified by CERMINE")
                 return False
+        logger.debug("Could not test title match with cermxml; "
+                     "self.dec_ms_title: {}; self.cerm_title: {}".format(self.dec_ms_title, self.cerm_title))
         return None
 
     def test_doi_match(self):
@@ -431,9 +455,6 @@ class PdfParser(BaseParser):
         :return: Tuple where: first element is string "success" or "fail" to indicate outcome; second element is
             string containing details
         '''
-        self.cermine_file()
-        self.test_file_has_image_on_first_page()
-
 
         approve_deposit = False
 
@@ -468,7 +489,12 @@ class PdfParser(BaseParser):
         self.test_results['title_match_cermxml'] = title_match_cermxml
         # endregion
 
-
+        # region logo tests
+        image_on_first_page = self.test_file_has_image_on_first_page()
+        self.test_results['image_on_first_page'] = image_on_first_page
+        detected_logos = self.detect_publisher_logos()
+        self.test_results['detected_logos'] = detected_logos
+        # endregion
 
         if more_than_three_pages and (title_match_file_metadata or title_match_extracted_text or title_match_cermxml):
             # sanity check (this is the correct file; no mistake on upload)

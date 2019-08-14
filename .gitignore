@@ -5,6 +5,7 @@ parsed_fieldnames.txt
 remove_pdf_watermark.py
 *_local.py
 tests.py
+logos_db.shelve
 
 # Cermine executable and documentation
 cermine-impl-1.13-jar-with-dependencies.jar

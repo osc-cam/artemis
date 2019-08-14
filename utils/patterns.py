@@ -2,31 +2,31 @@
 DOI_PATTERN = '10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+'
 
 CC0 = {'short name': 'CC0',
-       'long_name': 'Public domain',
+       'long name': 'Public domain',
        'url': 'https://creativecommons.org/publicdomain/zero/1.0/'}
 
 CC_BY = {'short name': 'CC BY',
-         'long_name': 'Creative Commons Attribution',
+         'long name': 'Creative Commons Attribution',
          'url': 'https://creativecommons.org/licenses/by/4.0/'}
 
 CC_BY_NC = {'short name': 'CC BY-NC',
-            'long_name': 'Creative Commons Attribution-NonCommercial',
+            'long name': 'Creative Commons Attribution-NonCommercial',
             'url': 'https://creativecommons.org/licenses/by-nc/4.0/'}
 
 CC_BY_ND = {'short name': 'CC BY-ND',
-            'long_name': 'Creative Commons Attribution-NoDerivatives',
+            'long name': 'Creative Commons Attribution-NoDerivatives',
             'url': 'https://creativecommons.org/licenses/by-nd/4.0/'}
 
 CC_BY_SA = {'short name': 'CC BY-SA',
-            'long_name': 'Creative Commons Attribution-ShareAlike',
+            'long name': 'Creative Commons Attribution-ShareAlike',
             'url': 'https://creativecommons.org/licenses/by-sa/4.0/'}
 
 CC_BY_NC_ND = {'short name': 'CC BY-NC-ND',
-               'long_name': 'Creative Commons Attribution-NonCommercial-NoDerivatives',
+               'long name': 'Creative Commons Attribution-NonCommercial-NoDerivatives',
                'url': 'https://creativecommons.org/licenses/by-nc-nd/4.0/'}
 
 CC_BY_NC_SA = {'short name': 'CC BY-NC-SA',
-               'long_name': 'Creative Commons Attribution-NonCommercial-ShareAlike',
+               'long name': 'Creative Commons Attribution-NonCommercial-ShareAlike',
                'url': 'https://creativecommons.org/licenses/by-nc-sa/4.0/'}
 
 ALL_CC_LICENCES = [CC0, CC_BY, CC_BY_NC, CC_BY_ND, CC_BY_SA, CC_BY_NC_ND, CC_BY_NC_SA]

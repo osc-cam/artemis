@@ -1,3 +1,41 @@
+from utils.constants import SMUR, AM, P, VOR
+
+class VersionPattern:
+    """
+    Regex patterns that are either indicative of or never found on a certain manuscript version
+    """
+    def __init__(self, pattern, indicative_of=None, not_found_on=None, error_ratio=0.1):
+        """
+        :param pattern: The regex pattern
+        :param indicative_of: list of manuscript versions we could expect to find pattern on
+        :param never_found_on: list of manuscript versions we would not normally expect to find pattern on
+        :param error_ratio: the tolerance for fuzzy matching of pattern
+        """
+        self.pattern = pattern,
+        self.indicative_of = indicative_of
+        self.not_found_on = not_found_on
+        self.error_ratio = error_ratio
+        if self.indicative_of and not self.not_found_on:
+            # https://stackoverflow.com/a/4211228/11999227
+            self.not_found_on = [x for x in [SMUR, AM, P, VOR] if x not in self.indicative_of]
+        elif self.not_found_on and not self.indicative_of:
+            self.indicative_of = [x for x in [SMUR, AM, P, VOR] if x not in self.not_found_on]
+
+
+VERSION_PATTERNS = [
+    VersionPattern("bioRxiv preprint first posted online", indicative_of=[SMUR]),
+    VersionPattern("The copyright holder for this preprint (which was not peer-reviewed) is the author/funder, who has "
+                   "granted bioRxiv a license to display the preprint in perpetuity", indicative_of=[SMUR]),
+    VersionPattern("Powered by Editorial Manager® and ProduXion Manager® from Aries Systems Corporation",
+                   indicative_of=[SMUR, AM]),
+    VersionPattern("This article has been accepted for publication and undergone full peer review but has not been "
+                   "through the copyediting, typesetting, pagination and proofreading process, which may lead to "
+                   "differences between this version and the Version of Record", indicative_of=[AM]),
+    VersionPattern("UNCORRECTED PROOF", indicative_of=[P]),
+    VersionPattern("Available online xxx", indicative_of=[P]),
+
+]
+
 # modified from: https://www.crossref.org/blog/dois-and-matching-regular-expressions/
 DOI_PATTERN = '10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+'
 
@@ -45,9 +83,4 @@ ADDITIONAL_CC_PATTERNS = [
 
 RIGHTS_RESERVED_PATTERNS = [
     {'pattern': "All rights reserved.", 'error ratio': 0.1},
-]
-
-PROOF_PATTERNS = [
-    {'pattern': "UNCORRECTED PROOF", 'error ratio': 0.1},
-    {'pattern': "Available online xxx", 'error ratio': 0},
 ]

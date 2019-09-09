@@ -2,33 +2,30 @@ import chardet
 from difflib import SequenceMatcher
 import logging
 import logging.config
+import math
 import os
 import regex
+import requests
 import shelve
+import statistics
 import subprocess
 import textract
 import xml.etree.ElementTree as ET
+from collections import Counter
+
 from docx import Document
+from io import StringIO, BytesIO
 from pprint import pprint
-from PyPDF2 import PdfFileReader
+from PyPDF2 import PdfFileReader, utils
 from PIL import Image
 import imagehash
 
+from utils.constants import SMUR, AM, P, VOR
 from utils.patterns import DOI_PATTERN, ALL_CC_LICENCES, RIGHTS_RESERVED_PATTERNS, PROOF_PATTERNS
 from utils.logos import PublisherLogo
 
-# create logger
+logging.config.fileConfig('logging.conf', defaults={'logfilename':'artemis.log'})
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-# create console handler and set level to debug
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-# create formatter
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# add formatter to ch
-ch.setFormatter(formatter)
-# add ch to logger
-# logger.addHandler(ch)
 
 # LOGOS_DB_PATH = os.path.join(os.path.realpath(__file__), "utils", "logos_db.shelve") # for some reason, this doesn't
 # work with line: with shelve.open("utils/logos_db.shelve") as db:
@@ -45,11 +42,10 @@ PUBLISHER_PDF_METADATA_TAGS = [
     '/ElsevierWebPDFSpecifications',
     '/Keywords',
 ]
-# NISO versions (source: https://groups.niso.org/publications/rp/RP-8-2008.pdf)
-SMUR = 'submitted manuscript under review'
-AM = 'accepted manuscript'
-P = 'proof'
-VOR = 'version of record'
+
+DOI_BASE_URL = "https://doi.org/"
+
+NUMBER_PATTERN = regex.compile("\d+")
 
 class BaseParser:
     """
@@ -151,7 +147,7 @@ class BaseParser:
                 m = self.find_match_in_extracted_text(query=l[key], escape_char=False,
                                                       allowed_error_ratio=error_ratio)
                 if m:
-                    logger.debug("Found Creative Commons statement in extracted text: {}".format(m.group()))
+                    logger.debug("Found Creative Commons statement in extracted text: {}".format(m['match']))
                     return m
         logger.debug("Could not find a Creative Commons statement in extracted text")
         return None
@@ -232,6 +228,25 @@ class BaseParser:
         logger.error("Extracted text unavailable (self.extracted_text), so could not perform test")
         return None
 
+    def test_doi_resolves(self, doi=None):
+        """
+        Test if DOI resolves; if not DOI given, attempt to use declared DOI in self.metadata
+        :param doi: DOI to check
+        :return:
+        """
+        if not doi:
+            try:
+                doi = self.metadata['doi']
+            except KeyError:
+                logger.debug("DOI not known; KeyError for self.metadata['doi']")
+                return None
+        r = requests.get(DOI_BASE_URL + doi, headers={'User-Agent': 'Mozilla/5.0'})
+        # r = requests.get("https://www.sciencedirect.com/science/article/pii/S1568786419302216?via%3Dihub", headers={'User-Agent': 'Mozilla/5.0'})
+        logger.debug("r.status_code = {}; r.text = {}".format(r.status_code, r.text))
+        if r.ok:
+            return True
+        else:
+            return False
 
 class DocxParser(BaseParser):
     """
@@ -289,10 +304,6 @@ class DocxParser(BaseParser):
 
 class PdfParser(BaseParser):
     #TODO: If pdf metadata field '/Creator' == publisher name, PDF is proof/published version
-    #TODO: Compare cermine extracted images to library of publisher logos:
-    # http://www.imagemagick.org/Usage/compare/
-    # https://pysource.com/2018/07/19/check-if-two-images-are-equal-with-opencv-and-python/
-    # https://datascience.stackexchange.com/questions/28840/compare-image-similarity-in-python
     #TODO: Investigate identifying watermark http://blog.uorz.me/2018/06/19/removeing-watermark-with-PyPDF2.html
     """
     Parser for .pdf files
@@ -336,14 +347,16 @@ class PdfParser(BaseParser):
 
     def cermine_file(self):
         '''
-        Runs CERMINE (https://github.com/CeON/CERMINE) on pdf file
+        Runs CERMINE (https://github.com/CeON/CERMINE) on pdf file. Useful presentation:
+        https://www.slideshare.net/dtkaczyk/tkaczyk-grotoap2slides
         :return:
         '''
         try:
             subprocess.run(["java", "-cp", "cermine-impl-1.13-jar-with-dependencies.jar",
                         "pl.edu.icm.cermine.ContentExtractor", "-path", self.file_dirname, "-outputs",
                         # '"jats,text"'
-                        '"jats,text,zones,trueviz,images"'
+                        '"trueviz"'
+                        # '"jats,text,zones,trueviz,images"'
                         ],
                        check=True)
         except subprocess.CalledProcessError as e:
@@ -458,12 +471,17 @@ class PdfParser(BaseParser):
 
         approve_deposit = False
 
+        # self.test_doi_resolves()
+
         # region file metadata tests
         self.extract_file_metadata()
         title_match_file_metadata = self.test_title_match_in_file_metadata('/Title')
         self.test_results['title_match_file_metadata'] = title_match_file_metadata
         file_metadata_contains_publisher_tags = self.test_file_metadata_contains_publisher_tags()
         self.test_results['file_metadata_contains_publisher_tags'] = file_metadata_contains_publisher_tags
+        if file_metadata_contains_publisher_tags:
+            self.possible_versions.remove(SMUR)
+            self.possible_versions.remove(AM)
         # endregion
 
         # region extracted text tests
@@ -472,6 +490,12 @@ class PdfParser(BaseParser):
         self.test_results['more_than_three_pages'] = more_than_three_pages
         title_match_extracted_text = self.test_title_match_in_extracted_text()
         self.test_results['title_match_extracted_text'] = title_match_extracted_text
+
+        doi_in_extracted_text = self.find_doi_in_extracted_text()
+        if doi_in_extracted_text:
+            doi_match = doi_in_extracted_text['match']
+            self.test_doi_resolves(doi=doi_match)
+
         doi_match_extracted_text = self.test_doi_match()
         self.test_results['doi_match_extracted_text'] = doi_match_extracted_text
         cc_match_extracted_text = self.find_cc_statement_in_extracted_text()
@@ -494,6 +518,25 @@ class PdfParser(BaseParser):
         self.test_results['image_on_first_page'] = image_on_first_page
         detected_logos = self.detect_publisher_logos()
         self.test_results['detected_logos'] = detected_logos
+
+        # exclude self.possible_versions that are not corroborated by detected logos
+        if detected_logos:
+            logger.debug("self.possible_versions before considering logos: {}".format(self.possible_versions))
+            suggested_versions = []
+            for dl in detected_logos:
+                for version in dl.metadata["indicate_ms_versions"]:
+                    if version not in suggested_versions:
+                        suggested_versions.append(version)
+            logger.debug("Versions suggested by logos: {}".format(suggested_versions))
+            for v in reversed(self.possible_versions): # https://stackoverflow.com/a/14283447
+                if v not in suggested_versions:
+                    self.possible_versions.remove(v)
+            logger.debug("self.possible_versions after considering logos: {}".format(self.possible_versions))
+
+
+
+
+
         # endregion
 
         if more_than_three_pages and (title_match_file_metadata or title_match_extracted_text or title_match_cermxml):
@@ -579,9 +622,7 @@ class VersionDetector:
 
 
 if __name__ == "__main__":
-    logfilename = 'artemis.log'
-    logging.config.fileConfig('logging.conf', defaults={'logfilename': logfilename})
-    logger = logging.getLogger('artemis')
+    pass
 
     # TODO: This project has some useful functions: https://github.com/Phyks/libbmc/blob/master/libbmc/doi.py
 

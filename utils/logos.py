@@ -1,3 +1,5 @@
+import imghdr
+import json
 import logging
 import logging.config
 import os
@@ -10,26 +12,16 @@ import shelve
 
 from difflib import SequenceMatcher
 
-# create logger
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-# create console handler and set level to debug
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-# create formatter
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# add formatter to ch
-ch.setFormatter(formatter)
-# add ch to logger
-# logger.addHandler(ch)
-
 PARENT_FOLDER = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+logging.config.fileConfig(os.path.join(PARENT_FOLDER, 'logging.conf'), defaults={'logfilename': 'logos.log'})
+logger = logging.getLogger(__name__)
+
 SHELVE_DB_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "logos_db.shelve")
 LOGOS_LIBRARY = os.path.join(PARENT_FOLDER, "publisher_logos")
 
 class PublisherLogo:
     def __init__(self, name, width=None, height=None, text=None, publisher=None,
-                 average_hash=None, perception_hash=None, path=None):
+                 average_hash=None, perception_hash=None, path=None, **kwargs):
         self.name = name
         self.width = width
         self.height = height
@@ -38,6 +30,13 @@ class PublisherLogo:
         self.average_hash = average_hash
         self.perception_hash = perception_hash
         self.path = path
+        self.metadata = kwargs
+
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return "PublisherLogo object: <name={}>".format(self.name)
 
     def store_in_db(self):
         if not self.width:
@@ -85,8 +84,8 @@ class PublisherLogo:
             if not pl_instance.average_hash:
                 pl_instance.calculate_average_hash()
             hash_difference = self.average_hash - pl_instance.average_hash
-            print(
-                "Average hash difference between {} and {} is {}".format(pl_instance.path, self.name, hash_difference))
+            logger.debug("Average hash difference between {} and {} is {}".format(pl_instance.path, self.name,
+                                                                                  hash_difference))
             if hash_difference <= max_hash_difference:
                 return True
         elif method == "perception":
@@ -95,7 +94,7 @@ class PublisherLogo:
             if not pl_instance.perception_hash:
                 pl_instance.calculate_perception_hash()
             hash_difference = self.perception_hash - pl_instance.perception_hash
-            print("Perception hash difference between {} and {} "
+            logger.debug("Perception hash difference between {} and {} "
                          "is {}".format(pl_instance.path, self.name, hash_difference))
             if hash_difference <= max_hash_difference:
                 return True
@@ -121,14 +120,16 @@ class PublisherLogo:
 
 
 def update_logos_db():
-    for logo_name in os.listdir(LOGOS_LIBRARY):
-        logo_path = os.path.join(LOGOS_LIBRARY, logo_name)
-        pl = PublisherLogo(logo_name, path=logo_path)
-        logger.info("Updating logo database")
-        pl.store_in_db()
+    for filename in os.listdir(LOGOS_LIBRARY):
+        file_path = os.path.join(LOGOS_LIBRARY, filename)
+        if imghdr.what(file_path):
+            json_filename = filename.split('.')[0] + '.json'
+            with open(os.path.join(LOGOS_LIBRARY,json_filename)) as f:
+                metadata = json.load(f)
+            pl = PublisherLogo(filename, path=file_path, **metadata)
+            pl.store_in_db()
+            logger.info("Added logo {} to shelve database".format(pl.name))
+
 
 if __name__ == "__main__":
-    logfilename = 'logos.log'
-    logging.config.fileConfig(os.path.join(PARENT_FOLDER, 'logging.conf'), defaults={'logfilename': logfilename})
-    logger = logging.getLogger('logos')
     update_logos_db()

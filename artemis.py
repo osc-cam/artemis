@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+
+__version__ = '2019.10'
+__author__ = 'André Sartori'
+
+import argparse
 import chardet
 from difflib import SequenceMatcher
 import logging
@@ -21,7 +27,7 @@ from PIL import Image
 import imagehash
 
 from utils.constants import SMUR, AM, P, VOR
-from utils.patterns import DOI_PATTERN, ALL_CC_LICENCES, RIGHTS_RESERVED_PATTERNS, PROOF_PATTERNS
+from utils.patterns import DOI_PATTERN, ALL_CC_LICENCES, RIGHTS_RESERVED_PATTERNS, VERSION_PATTERNS
 from utils.logos import PublisherLogo
 
 logging.config.fileConfig('logging.conf', defaults={'logfilename':'artemis.log'})
@@ -622,7 +628,33 @@ class VersionDetector:
 
 
 if __name__ == "__main__":
-    pass
+    sign_off = '''-------------
+Artemis {}
+Author: {}
+Copyright (c) 2019
+
+Artemis code and documentation is available at https://github.com/afs25/artemis
+
+You are free to distribute this software under the terms of the MIT License.  
+The complete text of the MIT License can be found at 
+https://opensource.org/licenses/MIT
+
+        '''.format(__version__, __author__)
+    description_text = 'Detects the manuscript version of an academic journal article'
+
+    parser = argparse.ArgumentParser(description=description_text, epilog=sign_off, prog='Artemis',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('-i', '--input', dest='input', type=str, metavar='<path>',
+                        help='Path to input file (journal article file to be analysed)')
+    parser.add_argument('-t', '--title', dest='title', type=str, metavar='"Expected title of journal article"',
+                        help='Expected/declared title of journal article')
+    parser.add_argument('-v', '--version', dest='version', type=str,
+                        metavar='{}, {}, {} or {}'.format(SMUR, AM, P, VOR),
+                        help='Expected/declared version of journal article')
+    arguments = parser.parse_args()
+
+    detector = VersionDetector(arguments.input, dec_ms_title=arguments.title, dec_version=arguments.version)
+    print(detector.detect())
 
     # TODO: This project has some useful functions: https://github.com/Phyks/libbmc/blob/master/libbmc/doi.py
 

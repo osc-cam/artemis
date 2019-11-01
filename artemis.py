@@ -6,6 +6,7 @@ __author__ = 'André Sartori'
 import argparse
 import chardet
 from difflib import SequenceMatcher
+import docx2txt
 import logging
 import logging.config
 import math
@@ -13,8 +14,10 @@ import os
 import regex
 import requests
 import shelve
+import shutil
 import statistics
 import subprocess
+import sys
 import textract
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -25,6 +28,7 @@ from pprint import pprint
 from PyPDF2 import PdfFileReader, utils
 from PIL import Image
 import imagehash
+from tempfile import TemporaryDirectory, mkdtemp
 
 from utils.constants import SMUR, AM, P, VOR
 from utils.patterns import DOI_PATTERN, ALL_CC_LICENCES, RIGHTS_RESERVED_PATTERNS, VERSION_PATTERNS
@@ -88,6 +92,7 @@ class BaseParser:
         Extracts text from file using textract (https://textract.readthedocs.io/en/stable/python_package.html)
         :return:
         '''
+
         try:
             if method:
                 self.extracted_text = textract.process(self.file_path, method=method)
@@ -283,29 +288,47 @@ class DocxParser(BaseParser):
             'content_status': docx.core_properties.content_status,
         }
 
+    def extract_text(self, method=None):
+        """
+        Overwrites extract_text function of BaseParser to use docx2txt instead
+        """
+        self.extracted_text = docx2txt.process(self.file_path)
+        return self.extracted_text
+
     def parse(self):
-        '''
+        """
         Workflow for DOCX files
         :return: Tuple where: first element is string "success" or "fail" to indicate outcome; second element is
             string containing details
-        '''
+        """
+
+        plausible_versions = ['submitted version', 'accepted version', SMUR, AM]
+        approve_deposit = False
+        reason = ""
 
         self.extract_file_metadata()
         title_match_file_metadata = self.test_title_match_in_file_metadata('title')
+        self.test_results["title_match_file_metadata"] = title_match_file_metadata
+
         self.extract_text()
         more_than_three_pages = self.test_length_of_extracted_text()
+        self.test_results["more_than_three_pages"] = more_than_three_pages
+
         title_match_extracted_text = self.test_title_match_in_extracted_text()
+        self.test_results["title_match_extracted_text"] = title_match_extracted_text
 
         if more_than_three_pages and (title_match_file_metadata or title_match_extracted_text):
-            if self.dec_version.lower() in ['submitted version', 'accepted version']:
-                return "success", self.dec_version
+            if self.dec_version.lower() in plausible_versions:
+                approve_deposit = True
+                reason = "Declared version is plausible"
             else:
-                return "fail", "This is either a submitted or accepted version, " \
+                reason = "This is either a submitted or accepted version, " \
                        "but declared version is {}".format(self.dec_version)
         else:
-            return "fail", "File {} failed automated checks. more_than_three_pages: {}, title_match_file_metadata:" \
-                           " {}, title_match_extracted_text: {}".format(self.file_name, more_than_three_pages,
-                                                           title_match_file_metadata, title_match_extracted_text)
+            reason = "File {} failed automated checks".format(self.file_name)
+
+        return {'input file': self.file_name, 'approved': approve_deposit, 'reason': reason,
+                **self.test_results}
 
 
 class PdfParser(BaseParser):
@@ -348,8 +371,15 @@ class PdfParser(BaseParser):
                            "using cermine instead")
             self.cermine_file()
             cermtxt_path = self.file_path.replace(self.file_ext, ".cermtxt")
-            with open(cermtxt_path) as f:
-                self.extracted_text = f.read()
+            if os.path.exists(cermtxt_path):
+                with open(cermtxt_path) as f:
+                    self.extracted_text = f.read()
+            else:
+                logger.error("Cermine failed to extract text; using pdftotext instead")
+                subprocess.run(["pdftotext", self.file_path], check=True)
+                txt_path = self.file_path.replace(self.file_ext, ".txt")
+                with open(txt_path) as f:
+                    self.extracted_text = f.read()
 
     def cermine_file(self):
         '''
@@ -361,8 +391,8 @@ class PdfParser(BaseParser):
             subprocess.run(["java", "-cp", "cermine-impl-1.13-jar-with-dependencies.jar",
                         "pl.edu.icm.cermine.ContentExtractor", "-path", self.file_dirname, "-outputs",
                         # '"jats,text"'
-                        '"trueviz"'
-                        # '"jats,text,zones,trueviz,images"'
+                        # '"trueviz"'
+                        '"jats,text,zones,trueviz,images"'
                         ],
                        check=True)
         except subprocess.CalledProcessError as e:
@@ -370,33 +400,35 @@ class PdfParser(BaseParser):
 
     def parse_cermxml(self):
         cermxml_path = self.file_path.replace(self.file_ext, ".cermxml")
-        with open(cermxml_path) as f:
-            tree = ET.parse(f)
-        root = tree.getroot()
-        # extract DOI
-        for c_id in root.iter('article-id'):
-            if c_id.get('pub-id-type') == 'doi':
-                if self.cerm_doi is not None:
-                    logger.warning("Previously detected DOI {} will be overwritten by value {}".format(self.cerm_doi,
-                                                                                                c_id.text))
-                self.cerm_doi = c_id.text
+        if os.path.exists(cermxml_path):
+            with open(cermxml_path) as f:
+                tree = ET.parse(f)
+            root = tree.getroot()
+            # extract DOI
+            for c_id in root.iter('article-id'):
+                if c_id.get('pub-id-type') == 'doi':
+                    if self.cerm_doi is not None:
+                        logger.warning("Previously detected DOI {} will be overwritten by value {}".format(self.cerm_doi,
+                                                                                                    c_id.text))
+                    self.cerm_doi = c_id.text
 
-        # extract title
-        for c_title in root.find('front').iter('article-title'):
-            if self.cerm_title is not None:
-                logger.warning("Previously detected title '{}' will be overwritten by value '{}'".format(self.cerm_title,
-                                                                                                   c_title.text))
-            self.cerm_title = c_title.text
+            # extract title
+            for c_title in root.find('front').iter('article-title'):
+                if self.cerm_title is not None:
+                    logger.warning("Previously detected title '{}' will be overwritten by value '{}'".format(self.cerm_title,
+                                                                                                       c_title.text))
+                self.cerm_title = c_title.text
 
-        # extract journal title
-        for c_journal in root.iter('journal-title'):
-            if self.cerm_journal_title is not None:
-                logger.warning("Previously detected journal title '{}' will be overwritten by"
-                               " value '{}'".format(self.cerm_journal_title, c_journal.text))
-            self.cerm_journal_title = c_journal.text
+            # extract journal title
+            for c_journal in root.iter('journal-title'):
+                if self.cerm_journal_title is not None:
+                    logger.warning("Previously detected journal title '{}' will be overwritten by"
+                                   " value '{}'".format(self.cerm_journal_title, c_journal.text))
+                self.cerm_journal_title = c_journal.text
 
-        self.cerm_ran_and_parsed = True
-        return self.cerm_doi, self.cerm_title, self.cerm_journal_title
+            self.cerm_ran_and_parsed = True
+            return self.cerm_doi, self.cerm_title, self.cerm_journal_title
+        return None
 
     def detect_publisher_logos(self, max_hash_difference=5, stop_at_first_match=False):
         """
@@ -435,12 +467,17 @@ class PdfParser(BaseParser):
         return False
 
     def test_file_metadata_contains_publisher_tags(self):
+        detected_publisher_tags = 0
         for tag in PUBLISHER_PDF_METADATA_TAGS:
             if tag in self.file_metadata.keys():
                 logger.debug("Found publisher tag {} in file metadata".format(tag))
-                return True
-        logger.debug("Could not find any publisher tags in file metadata")
-        return False
+                if self.file_metadata[tag]:
+                    detected_publisher_tags += 1
+                else:
+                    logger.debug("However tag {} in file metadata has no value".format(tag))
+        if not detected_publisher_tags:
+            logger.debug("Could not find any publisher tags in file metadata")
+        return detected_publisher_tags
 
     def test_title_match_cermxml(self, min_similarity=0.9):
         """
@@ -484,7 +521,7 @@ class PdfParser(BaseParser):
         title_match_file_metadata = self.test_title_match_in_file_metadata('/Title')
         self.test_results['title_match_file_metadata'] = title_match_file_metadata
         file_metadata_contains_publisher_tags = self.test_file_metadata_contains_publisher_tags()
-        self.test_results['file_metadata_contains_publisher_tags'] = file_metadata_contains_publisher_tags
+        self.test_results['number_of_publisher_tags_in_file_metadata'] = file_metadata_contains_publisher_tags
         if file_metadata_contains_publisher_tags:
             self.possible_versions.remove(SMUR)
             self.possible_versions.remove(AM)
@@ -559,7 +596,7 @@ class PdfParser(BaseParser):
                 else:
                     reason = 'Publisher-generated version; no evidence of CC licence'
             else:
-                if self.dec_version.lower() in ['submitted version', 'accepted version']:
+                if self.dec_version.lower() in ['submitted version', 'accepted version', SMUR, AM]:
                     approve_deposit = True
                     reason = 'Could not find any evidence that this PDF is publisher-generated'
                 else:
@@ -571,14 +608,16 @@ class PdfParser(BaseParser):
                                                                         more_than_three_pages,
                                                                         title_match_file_metadata,
                                                                         title_match_extracted_text)
-        return {'approved': approve_deposit, 'reason': reason, **self.test_results}
+        return {'input file': self.file_name, 'approved': approve_deposit, 'reason': reason, **self.test_results}
 
 
 class VersionDetector:
-    def __init__(self, file_path, dec_ms_title=None, dec_version=None, dec_authors=None, **kwargs):
+    def __init__(self, file_path, keep_temp_files=False,
+                 dec_ms_title=None, dec_version=None, dec_authors=None, **kwargs):
         '''
 
         :param file_path: Path to file this class will evaluate
+        :param keep_temp_files: If true, temp directory containing files extracted by CERMINE is not deleted
         :param dec_ms_title: Declared title of manuscript
         :param dec_version: Declared manuscript version of file
         :param dec_authors: Declared authors of manuscript (list)
@@ -586,7 +625,9 @@ class VersionDetector:
             acceptance_date=None, doi=None, publication_date=None, title=None
         '''
         self.file_path = file_path
+        self.file_name = os.path.basename(self.file_path)
         self.file_ext = os.path.splitext(self.file_path)[-1].lower()
+        self.keep_temp_files = keep_temp_files
         self.dec_ms_title = dec_ms_title
         self.dec_version = dec_version
         self.dec_authors = dec_authors
@@ -612,16 +653,29 @@ class VersionDetector:
         """
         ext = self.check_extension()
         if ext == "docx":
-            parser = DocxParser(self.file_path, self.dec_ms_title, self.dec_version, self.dec_authors, **self.metadata)
+            p = DocxParser(self.file_path, self.dec_ms_title, self.dec_version, self.dec_authors, **self.metadata)
+            result = p.parse()
         elif ext == "pdf":
-            parser = PdfParser(self.file_path, self.dec_ms_title, self.dec_version, self.dec_authors, **self.metadata)
+            def pdf_routine(detector_instance, temp_file):
+                shutil.copy2(detector_instance.file_path, temp_file)
+                pdfparser = PdfParser(temp_file, detector_instance.dec_ms_title,
+                                      detector_instance.dec_version, detector_instance.dec_authors,
+                                      **detector_instance.metadata)
+                return pdfparser.parse()
+            if not self.keep_temp_files:
+                with TemporaryDirectory(prefix="artemis-") as tmpdir:
+                    tmpfile = os.path.join(tmpdir, self.file_name)
+                    result = pdf_routine(self, tmpfile)
+            else:
+                tmpdir = mkdtemp(prefix="artemis-")
+                tmpfile = os.path.join(tmpdir, self.file_name)
+                result = pdf_routine(self, tmpfile)
+
         else:
             error_msg = "{} is not a supported file extension".format(ext)
             logger.error(error_msg)
             return "fail", error_msg
             # sys.exit(error_msg)
-
-        result = parser.parse()
         return result
 
 
@@ -644,16 +698,19 @@ https://opensource.org/licenses/MIT
 
     parser = argparse.ArgumentParser(description=description_text, epilog=sign_off, prog='Artemis',
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('-i', '--input', dest='input', type=str, metavar='<path>',
+    parser.add_argument('path', type=str, metavar='<path>',
                         help='Path to input file (journal article file to be analysed)')
+    parser.add_argument('-k', '--keep', dest='keep', action="store_true",
+                        help='Keep temporary files')
     parser.add_argument('-t', '--title', dest='title', type=str, metavar='"Expected title of journal article"',
                         help='Expected/declared title of journal article')
     parser.add_argument('-v', '--version', dest='version', type=str,
-                        metavar='{}, {}, {} or {}'.format(SMUR, AM, P, VOR),
+                        metavar='"{}", "{}", "{}" or "{}"'.format(SMUR, AM, P, VOR),
                         help='Expected/declared version of journal article')
     arguments = parser.parse_args()
 
-    detector = VersionDetector(arguments.input, dec_ms_title=arguments.title, dec_version=arguments.version)
+    detector = VersionDetector(arguments.path, keep_temp_files=arguments.keep,
+                               dec_ms_title=arguments.title, dec_version=arguments.version)
     print(detector.detect())
 
     # TODO: This project has some useful functions: https://github.com/Phyks/libbmc/blob/master/libbmc/doi.py

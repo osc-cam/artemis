@@ -1,5 +1,5 @@
 # Cambridge local and test files
-cambridge_test.*
+cambridge_test.log
 parsed_fieldnames.txt
 remove_pdf_watermark.py
 *_local.py

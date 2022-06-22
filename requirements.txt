@@ -11,7 +11,7 @@ idna==2.8
 ImageHash==4.0
 IMAPClient==2.1.0
 lxml==4.6.5
-numpy==1.21.0
+numpy==1.22.0
 olefile==0.46
 pdfminer.six==20181108
 Pillow==8.3.2

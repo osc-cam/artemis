@@ -1,7 +1,7 @@
 argcomplete==1.8.2
 beautifulsoup4==4.5.3
 cachetools==3.1.1
-certifi==2019.6.16
+certifi==2022.12.7
 chardet==3.0.4
 docx2txt==0.6
 EbookLib==0.15
